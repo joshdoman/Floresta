@@ -37,6 +37,7 @@ use self::partial_chain::PartialChainState;
 use crate::prelude::*;
 use crate::pruned_utreexo::utxo_data::UtxoData;
 use crate::BlockConsumer;
+use crate::BlockWithInputsConsumer;
 use crate::BlockchainError;
 use crate::UtreexoBlock;
 
@@ -66,6 +67,8 @@ pub trait BlockchainInterface {
     /// vector or a channel where data can be  transferred to the atual worker, otherwise
     /// chainstate will be stuck for as long as you have work to do.
     fn subscribe(&self, tx: Arc<dyn BlockConsumer>);
+    /// Register for receiving notifications about new blocks, including input data.
+    fn subscribe_with_inputs(&self, tx: Arc<dyn BlockWithInputsConsumer>);
     /// Tells whether or not we are on IBD
     fn is_in_ibd(&self) -> bool;
     /// Returns the list of unbroadcasted transactions.
@@ -263,6 +266,10 @@ impl<T: BlockchainInterface> BlockchainInterface for Arc<T> {
 
     fn subscribe(&self, tx: Arc<dyn BlockConsumer>) {
         T::subscribe(self, tx)
+    }
+
+    fn subscribe_with_inputs(&self, tx: Arc<dyn BlockWithInputsConsumer>) {
+        T::subscribe_with_inputs(self, tx)
     }
 
     fn is_in_ibd(&self) -> bool {
