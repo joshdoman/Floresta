@@ -14,6 +14,7 @@
 //! Key definitions:
 //! - [ChainState]: The high-level chain backend
 //! - [BlockConsumer]: Trait for receiving new block notifications
+//! - [BlockWithSpentUtxosConsumer]: Trait for receiving new block notifications with the spent UTXOs
 extern crate alloc;
 
 use alloc::borrow::ToOwned;
@@ -75,6 +76,16 @@ impl BlockConsumer for Channel<(Block, u32)> {
     }
 }
 
+/// Trait for components that need to receive notifications about new blocks and the spent UTXOs.
+pub trait BlockWithSpentUtxosConsumer: Sync + Send + 'static {
+    fn consume_block_with_spent_utxos(
+        &self,
+        block: &Block,
+        height: u32,
+        spent_utxos: &HashMap<OutPoint, UtxoData>,
+    );
+}
+
 /// Internal state of the blockchain managed by `ChainState`.
 pub struct ChainStateInner<PersistedState: ChainStore> {
     /// The acc we use for validation.
@@ -94,6 +105,8 @@ pub struct ChainStateInner<PersistedState: ChainStore> {
     /// If a module just wants pass in a channel, `Sender` implements [BlockConsumer], and can
     /// be used during subscription (just keep the `Receiver` side.
     subscribers: Vec<Arc<dyn BlockConsumer>>,
+    /// Subscribers that need input data
+    input_subscribers: Vec<Arc<dyn BlockWithSpentUtxosConsumer>>,
     /// Fee estimation for 1, 10 and 20 blocks
     fee_estimation: (f64, f64, f64),
     /// Are we in Initial Block Download?
@@ -480,11 +493,13 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
             .ok_or(BlockchainError::BlockNotPresent)
     }
 
-    fn notify(&self, block: &Block, height: u32) {
+    fn notify(&self, block: &Block, height: u32, inputs: HashMap<OutPoint, UtxoData>) {
         let inner = self.inner.read();
-        let subs = inner.subscribers.iter();
-        for client in subs {
+        for client in &inner.subscribers {
             client.consume_block(block, height);
+        }
+        for client in &inner.input_subscribers {
+            client.consume_block_with_spent_utxos(block, height, &inputs);
         }
     }
 
@@ -522,6 +537,7 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
                 },
                 broadcast_queue: Vec::new(),
                 subscribers: Vec::new(),
+                input_subscribers: Vec::new(),
                 fee_estimation: (1_f64, 1_f64, 1_f64),
                 ibd: true,
                 consensus: Consensus { parameters },
@@ -682,6 +698,7 @@ impl<PersistedState: ChainStore> ChainState<PersistedState> {
             chainstore,
             fee_estimation: (1_f64, 1_f64, 1_f64),
             subscribers: Vec::new(),
+            input_subscribers: Vec::new(),
             ibd: true,
             consensus: Consensus {
                 // TODO: handle possible Err
@@ -1116,6 +1133,11 @@ impl<PersistedState: ChainStore> BlockchainInterface for ChainState<PersistedSta
         inner.subscribers.push(tx);
     }
 
+    fn subscribe_with_spent_utxos(&self, tx: Arc<dyn BlockWithSpentUtxosConsumer>) {
+        let mut inner = self.inner.write();
+        inner.input_subscribers.push(tx);
+    }
+
     fn get_block_locator(&self) -> Result<Vec<BlockHash>, BlockchainError> {
         let top_height = self.get_height()?;
         let mut indexes = Vec::new();
@@ -1287,6 +1309,12 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
             }
         };
 
+        let inputs_for_notifications = if self.inner.read().input_subscribers.is_empty() {
+            HashMap::new()
+        } else {
+            inputs.clone()
+        };
+
         self.validate_block_no_acc(block, height, inputs)?;
         let acc = Consensus::update_acc(&self.acc(), block, height, proof, del_hashes)?;
 
@@ -1306,7 +1334,7 @@ impl<PersistedState: ChainStore> UpdatableChainstate for ChainState<PersistedSta
         }
 
         // Notify others we have a new block
-        self.notify(block, height);
+        self.notify(block, height, inputs_for_notifications);
         Ok(height)
     }
 
@@ -1415,6 +1443,7 @@ impl<T: ChainStore> TryFrom<ChainStateBuilder<T>> for ChainState<T> {
             ibd: builder.ibd(),
             broadcast_queue: Vec::new(),
             subscribers: Vec::new(),
+            input_subscribers: Vec::new(),
             fee_estimation: (1_f64, 1_f64, 1_f64),
             consensus: Consensus {
                 parameters: builder.chain_params()?,
